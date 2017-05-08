@@ -130,8 +130,10 @@ class Structure2TextModel(object):
         #     cell, inputs, initial_state=self._initial_state)
         outputs = []
         state = self._initial_state
-        cell_output = tf.Variable(np.asarray([[0.1]*config.hidden_size*config.num_layers]*batch_size))
+        cell_output = tf.Variable(tf.truncated_normal([batch_size, config.hidden_size*config.num_layers]))
         W = weight_variable([embedding_size, embedding_size])
+        W_out2emb = weight_variable([config.hidden_size*config.num_layers, embedding_size])
+        b_out2emb = weight_variable([ embedding_size])
         with tf.variable_scope("RNN"):
             for time_step in range(num_steps):
                 if time_step > 0:
@@ -149,7 +151,14 @@ class Structure2TextModel(object):
                 attention = tf.nn.softmax(attention)
 
                 tableinput = tf.matmul(tf.expand_dims(attention, 1) , table_item_vector)[:,0,:]   # batch 1 embed_size
-                (cell_output, state) = cell(tableinput, state)
+                nextinput = tf.concat([cell_output, tableinput], 1)
+                (cell_output, state) = cell(nextinput, state)
+                out_wordemb = tf.matmul(cell_output, W_out2emb) + b_out2emb   # batch * embsize
+                vocab_score = tf.matmul(out_wordemb, tf.transpose(embedding))   # batch * vocabsize
+                chosen_word_indexes = tf.argmax(vocab_score)   # batch
+                chosen_words = tf.nn.embedding_lookup(embedding, chosen_word_indexes)  # batch * embsize
+                cell_output = chosen_words
+
                 outputs.append(cell_output)
 
         output = tf.reshape(tf.concat(axis=1, values=outputs), [-1, size])
