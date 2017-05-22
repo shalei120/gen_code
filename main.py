@@ -37,13 +37,10 @@ def load_data():
     #print(len(index2vec))
     title_set = cPickle.load(datafile)
 
-    train_x = cPickle.load(datafile)
-    train_y= cPickle.load(datafile)
-    dev_x = cPickle.load(datafile)
-    dev_y= cPickle.load(datafile)
-    test_x = cPickle.load(datafile)
-    test_y = cPickle.load(datafile)
-    return train_x, train_y, dev_x, dev_y, test_x, test_y
+    train_data = cPickle.load(datafile)
+    dev_data = cPickle.load(datafile)
+    test_data = cPickle.load(datafile)
+    return train_data, dev_data, test_data
 
 def weight_variable(shape):
     """Create a weight variable with appropriate initialization."""
@@ -62,7 +59,7 @@ class S2TInput(object):
     def __init__(self, config, data, name=None):
         self.batch_size = batch_size = config.batch_size
         self.num_steps = num_steps = config.num_steps
-        self.epoch_size = ((len(data) // batch_size) - 1) // num_steps
+        self.epoch_size = len(data) // batch_size
         self.item_num = 10
         self.input_table_title = tf.placeholder('int32', [None, self.item_num])
         self.input_table_items = tf.placeholder('int32', [None, self.item_num, None])
@@ -262,55 +259,8 @@ class SmallConfig(object):
     vocab_size = len(index2vec)
 
 
-class MediumConfig(object):
-    """Medium config."""
-    init_scale = 0.05
-    learning_rate = 1.0
-    max_grad_norm = 5
-    num_layers = 2
-    num_steps = 35
-    hidden_size = 650
-    max_epoch = 6
-    max_max_epoch = 39
-    keep_prob = 0.5
-    lr_decay = 0.8
-    batch_size = 20
-    vocab_size = len(index2vec)
 
-
-class LargeConfig(object):
-    """Large config."""
-    init_scale = 0.04
-    learning_rate = 1.0
-    max_grad_norm = 10
-    num_layers = 2
-    num_steps = 35
-    hidden_size = 1500
-    max_epoch = 14
-    max_max_epoch = 55
-    keep_prob = 0.35
-    lr_decay = 1 / 1.15
-    batch_size = 20
-    vocab_size = len(index2vec)
-
-
-class TestConfig(object):
-    """Tiny config, for testing."""
-    init_scale = 0.1
-    learning_rate = 1.0
-    max_grad_norm = 1
-    num_layers = 1
-    num_steps = 2
-    hidden_size = 2
-    max_epoch = 1
-    max_max_epoch = 1
-    keep_prob = 1.0
-    lr_decay = 0.5
-    batch_size = 20
-    vocab_size = len(index2vec)
-
-
-def run_epoch(session, model, data_x, data_y, eval_op=None, verbose=False):
+def run_epoch(session, model, data, eval_op=None, verbose=False):
     """Runs the model on the given data."""
     start_time = time.time()
     costs = 0.0
@@ -324,12 +274,14 @@ def run_epoch(session, model, data_x, data_y, eval_op=None, verbose=False):
     if eval_op is not None:
         fetches["eval_op"] = eval_op
 
-    for step in range(model.input.epoch_size):
+    for i in range(model.input.epoch_size):
         feed_dict = {}
-        feed_dict[model.input.input_table_items] =
-        for i, (c, h) in enumerate(model.initial_state):
-            feed_dict[c] = state[i].c
-            feed_dict[h] = state[i].h
+        feed_dict[model.input.input_table_title] = data[0][i * model.input.batch_size:(i+1) * model.input.batch_size]
+        feed_dict[model.input.input_table_items] = data[1][i * model.input.batch_size:(i+1) * model.input.batch_size]
+        feed_dict[model.input.input_item_length] = data[2][i * model.input.batch_size:(i+1) * model.input.batch_size]
+        feed_dict[model.input.targets]           = data[3][i * model.input.batch_size:(i+1) * model.input.batch_size]
+        feed_dict[model.input.target_numsteps]   = data[4][i * model.input.batch_size:(i+1) * model.input.batch_size]
+
 
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
@@ -347,16 +299,7 @@ def run_epoch(session, model, data_x, data_y, eval_op=None, verbose=False):
 
 
 def get_config():
-    if FLAGS.model == "small":
         return SmallConfig()
-    elif FLAGS.model == "medium":
-        return MediumConfig()
-    elif FLAGS.model == "large":
-        return LargeConfig()
-    elif FLAGS.model == "test":
-        return TestConfig()
-    else:
-        raise ValueError("Invalid model: %s", FLAGS.model)
 
 
 def main(_):
@@ -364,7 +307,7 @@ def main(_):
         raise ValueError("Must set --data_path to PTB data directory")
 
     raw_data = load_data()
-    train_x, train_y, valid_x, valid_y, test_x, test_y = raw_data
+    train_data, dev_data, test_data = raw_data
 
     config = get_config()
     eval_config = get_config()
@@ -376,20 +319,20 @@ def main(_):
                                                     config.init_scale)
 
         with tf.name_scope("Train"):
-            train_input = S2TInput(config=config, data=train_y, name="TrainInput")
+            train_input = S2TInput(config=config, data=train_data, name="TrainInput")
             with tf.variable_scope("Model", reuse=None, initializer=initializer):
                 m = Structure2TextModel(is_training=True, config=config, input_=train_input)
             tf.summary.scalar("Training Loss", m.cost)
             tf.summary.scalar("Learning Rate", m.lr)
 
         with tf.name_scope("Valid"):
-            valid_input = S2TInput(config=config, data=valid_y, name="ValidInput")
+            valid_input = S2TInput(config=config, data=dev_data, name="ValidInput")
             with tf.variable_scope("Model", reuse=True, initializer=initializer):
                 mvalid = Structure2TextModel(is_training=False, config=config, input_=valid_input)
             tf.summary.scalar("Validation Loss", mvalid.cost)
 
         with tf.name_scope("Test"):
-            test_input = S2TInput(config=eval_config, data=test_y, name="TestInput")
+            test_input = S2TInput(config=eval_config, data=test_data, name="TestInput")
             with tf.variable_scope("Model", reuse=True, initializer=initializer):
                 mtest = Structure2TextModel(is_training=False, config=eval_config,
                                  input_=test_input)
@@ -401,7 +344,7 @@ def main(_):
                 m.assign_lr(session, config.learning_rate * lr_decay)
 
                 print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
-                train_perplexity = run_epoch(session, m, train_x, train_y, eval_op=m.train_op, verbose=True )
+                train_perplexity = run_epoch(session, m, train_data, eval_op=m.train_op, verbose=True )
                 print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
                 valid_perplexity = run_epoch(session, mvalid)
                 print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))

@@ -200,30 +200,46 @@ def DataPreprocessing():
            # break
 
 
-        return boxes, passages
+        assert len(boxes) == len(passages)
+
+        def gene_case(box,p):
+            titles = [item[0] for item in box]       #[]
+            contents = [item[1] for item in box]     #[[] [] []]
+            contents_len = [len(item[1]) for item in box]     #[[] [] []]
+            target = p
+            target_len = len(p)
+            return (titles, contents, contents_len, target, target_len)
+
+        cases = [gene_case(box,p) for box, p in zip(boxes, passages)]
+        sorted_cases = sorted(cases, key = lambda x: x[4])
+
+        titles = [case[0] for case in sorted_cases]
+        contents = [case[1] for case in sorted_cases]
+        content_len = [case[2] for case in sorted_cases]
+        target = [case[3] for case in sorted_cases]
+        target_len = [case[4] for case in sorted_cases]
+
+        return (titles, contents, content_len, target, target_len)
 
     train_table_list = cPickle.load(infoboxfile)
-    train_x, train_y = deal_set('train',train_table_list)
+    train_data = deal_set('train',train_table_list)
     print 'traindata got!', time.time()
 
     dev_table_list = cPickle.load(infoboxfile)
-    dev_x, dev_y = deal_set('valid',dev_table_list)
+    dev_data = deal_set('valid',dev_table_list)
     print 'dev got!', time.time()
 
     test_table_list = cPickle.load(infoboxfile)
-    test_x, test_y = deal_set('test',test_table_list)
+    test_data = deal_set('test',test_table_list)
     print 'test got!', time.time()
 
     recordfile = open(datafolder + 'gen_' + sys.argv[1] + '_data1.dat', 'wb')
     cPickle.dump(index2vec, recordfile, -1)
     cPickle.dump(title_set, recordfile, -1)
 
-    cPickle.dump(train_x, recordfile, -1)
-    cPickle.dump(train_y, recordfile, -1)
-    cPickle.dump(dev_x, recordfile, -1)
-    cPickle.dump(dev_y, recordfile, -1)
-    cPickle.dump(test_x, recordfile, -1)
-    cPickle.dump(test_y, recordfile, -1)
+    cPickle.dump(train_data, recordfile, -1)
+    cPickle.dump(dev_data, recordfile, -1)
+    cPickle.dump(test_data, recordfile, -1)
 
 
 
