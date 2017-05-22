@@ -21,7 +21,7 @@ def read_word2vec():
     # f = open('D:/Grade4_1/AnswerSelection/glove.6B.'+sys.argv[1]+'d.txt')
     lines = f.readlines()
     g = lambda x: numpy.array(x, dtype=numpy.float32)
-    dic = {line.strip().split(' ')[0]: g(line.strip().split(' ')[1:]) for line in lines}
+    dic = {line.strip().split(' ')[0]: g(line.strip().split(' ')[1:]) for index,line in enumerate(lines) if index < 20000}
     dic['</s>'] = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
     dic['-1'] = numpy.zeros([int(sys.argv[1])]).astype('float32')
     print 'Dictionary Got!'
@@ -40,12 +40,13 @@ for i, a in enumerate(word2vec):
 index2vec = numpy.asarray([word2vec[a] for a in index2word])
 print time.time(), 'Wembid'
 
+index2word_set = set(index2word)
 title_set = dict()
 
 def TurnWordID(words):
     res = []
     for w in words:
-        if w in index2word:
+        if w in index2word_set:
             res.append(word2index[w])
         else:
             res.append(word2index['</s>'])
@@ -70,13 +71,10 @@ def KnuthSampling(total_num, sampling_num):
     return res
 
 
-def DataPreprocessing():
-    print 'wikiqa', time.time()
-    mainfolder = '/home/shalei/wikibio/wikipedia-biography-dataset/'
-    datafolder = '/home/shalei/gen_data/'
-
-
-
+print 'start', time.time()
+mainfolder = '/home/shalei/wikibio/wikipedia-biography-dataset/'
+datafolder = '/home/shalei/gen_data/'
+def transfer_boxes():
     def transform_infobox(info):
         items = info.split()
         items = [(t.split(':')[0], t.split(':')[1]) for t in items]
@@ -88,7 +86,7 @@ def DataPreprocessing():
                     title = ' '.join(item[0].split('_')[:-1])
                     if title not in title_set:
                         title_set[title] = len(title_set)
-                    ditem = (title , item[1])
+                    ditem = [title , item[1]]
                     dealed_items.append(ditem)
                 else:
                     dealed_items[-1][1] += ' ' + item[1]
@@ -99,50 +97,93 @@ def DataPreprocessing():
 
                 if item[1] != '<none>':
                     dealed_items.append(item)
+        return dealed_items
 
-        res = []
-        for item in dealed_items:
-            resitem = []
-            resitem.append(title_set[item[0]])
-            content_words = item[1].split()
-            content_word_ids = []
-            for word in content_words:
-                if word in index2word:
-                    content_word_ids.append(word2index[word])
-                else:
-                    word2index[word] = len(index2word)
-                    index2word.append(word)
-                    word2vec[word] = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
-                    index2vec = numpy.append(index2vec, word2vec[word], axis = 1)
-
-                    content_word_ids.append(word2index[word])
-
-            resitem.append(content_word_ids)
-            res.append(resitem)
-
-        return res
-
-
-
-
-
-
-    def deal_set(setname):
+    def deal_set_info(setname):
         folder = mainfolder + setname + '/'
         infoboxfile = open(folder + setname + '.box', 'r')
+        lines = infoboxfile.readlines()
+        boxes=[]
+        for line in lines:
+            box = transform_infobox(line)
+            boxes.append(box)
+        return boxes
+
+    infoboxout = open(datafolder + 'boxout.dat', 'wb')
+    train_box  = deal_set_info('train')
+    print 'train dealed'
+    valid_box = deal_set_info('valid')
+    print 'valid dealed'
+    test_box = deal_set_info('test')
+    print 'test dealed'
+
+    cPickle.dump(title_set, infoboxout, -1)
+    cPickle.dump(train_box, infoboxout, -1)
+    cPickle.dump(valid_box, infoboxout, -1)
+    cPickle.dump(test_box, infoboxout, -1)
+
+
+
+def DataPreprocessing():
+    infoboxfile = open(datafolder + 'boxout.dat', 'rb')
+    title_set = cPickle.load(infoboxfile)
+
+
+    def deal_set(setname, dealed_table_list):
+        folder = mainfolder + setname + '/'
         sentencenumfile = open(folder + setname + '.nb', 'r')
         sentencefile = open(folder + setname + '.sent', 'r')
 
-        lines = infoboxfile.readlines()
+        boxes = []
+        buffer_vec = []
+        count = 0
+        for dealed_table in dealed_table_list:
+            count+=1
+            if count%10000 == 0:
+                print count,'completed'
+            box = []
+            for index,item in enumerate(dealed_table):
+                resitem = []
+                resitem.append(title_set[item[0]])
+                content_words = item[1].split()
+                content_word_ids = []
+                for word in content_words:
+                    if word in index2word_set:
+                        content_word_ids.append(word2index[word])
+                    else:
+                        content_word_ids.append(len(index2word))
+                        word2index[word] = len(index2word)
+                        index2word.append(word)
+                        index2word_set.add(word)
+                        print word
+                        wv = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
+                        word2vec[word] = wv
+
+                        buffer_vec.append(wv)
+
+                resitem.append(content_word_ids)
+                box.append(resitem)
+            boxes.append(box)
+
+        buffer_np_vec = numpy.asarray(buffer_vec)
+        global index2vec
+        index2vec = numpy.concatenate([index2vec, buffer_np_vec], axis=0)
 
         sentnbs = sentencenumfile.readlines()
         sentnbs = [int(a) for a in sentnbs]
 
-        boxes = []
         passages = []
 
-        for line, nb in zip(lines, sentnbs):
-            box = transform_infobox(line)
+        count = 0
+
+        print len(dealed_table_list), len(sentnbs)
+
+        for nb in  sentnbs:
+            count += 1
+            if count % 1000 == 0:
+                print count, ' cases completed!!'
+
+            #print line
 
             sentences = []
 
@@ -150,26 +191,33 @@ def DataPreprocessing():
                 sent = sentencefile.readline()
                 words = sent.split()
                 sentids = TurnWordID(words)
-                sentences.append(sentids)
+                sentences += sentids
+                #print sent
 
-            boxes.append(box)
             passages.append(sentences)
+           # print box
+           # print nb,sentences
+           # break
 
 
         return boxes, passages
 
-
-
-    train_x, train_y = deal_set('train')
+    train_table_list = cPickle.load(infoboxfile)
+    train_x, train_y = deal_set('train',train_table_list)
     print 'traindata got!', time.time()
 
-    dev_x, dev_y = deal_set('valid')
+    dev_table_list = cPickle.load(infoboxfile)
+    dev_x, dev_y = deal_set('valid',dev_table_list)
     print 'dev got!', time.time()
 
-    test_x, test_y = deal_set('test')
+    test_table_list = cPickle.load(infoboxfile)
+    test_x, test_y = deal_set('test',test_table_list)
     print 'test got!', time.time()
 
     recordfile = open(datafolder + 'gen_' + sys.argv[1] + '_data1.dat', 'wb')
+    cPickle.dump(index2vec, recordfile, -1)
+    cPickle.dump(title_set, recordfile, -1)
+
     cPickle.dump(train_x, recordfile, -1)
     cPickle.dump(train_y, recordfile, -1)
     cPickle.dump(dev_x, recordfile, -1)
@@ -180,6 +228,7 @@ def DataPreprocessing():
 
 
 if __name__ == '__main__':
+    #transfer_boxes()
     DataPreprocessing()
 
 toc = time.time()
