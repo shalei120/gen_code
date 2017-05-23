@@ -59,8 +59,8 @@ class S2TInput(object):
     def __init__(self, config, data, name=None):
         self.batch_size = batch_size = config.batch_size
         self.num_steps = num_steps = config.num_steps
-        self.epoch_size = len(data) // batch_size
-        self.item_num = 10
+        self.epoch_size = len(data[0]) // batch_size
+        self.item_num = config.item_num
         self.input_table_title = tf.placeholder('int32', [None, self.item_num])
         self.input_table_items = tf.placeholder('int32', [None, self.item_num, None])
         self.input_item_length = tf.placeholder('int32', [None, self.item_num])
@@ -202,7 +202,7 @@ class Structure2TextModel(object):
         if not is_training:
             return
 
-        self._lr = tf.Variable(0.0, trainable=False)
+        self._lr = tf.Variable(0.001, trainable=False)
         tvars = tf.trainable_variables()
         grads, _ = tf.clip_by_global_norm(tf.gradients(cost, tvars),
                                           config.max_grad_norm)
@@ -257,6 +257,7 @@ class SmallConfig(object):
     lr_decay = 0.5
     batch_size = 20
     vocab_size = len(index2vec)
+    item_num = 20
 
 
 
@@ -274,6 +275,8 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     if eval_op is not None:
         fetches["eval_op"] = eval_op
 
+    print(model.input.epoch_size)
+
     for i in range(model.input.epoch_size):
         feed_dict = {}
         feed_dict[model.input.input_table_title] = data[0][i * model.input.batch_size:(i+1) * model.input.batch_size]
@@ -282,17 +285,53 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
         feed_dict[model.input.targets]           = data[3][i * model.input.batch_size:(i+1) * model.input.batch_size]
         feed_dict[model.input.target_numsteps]   = data[4][i * model.input.batch_size:(i+1) * model.input.batch_size]
 
+        title_nums = [len(t) for t in feed_dict[model.input.input_table_title]]
+        max_title_num = max(title_nums)
+        tmp_input_table_title = np.zeros([model.input.batch_size, max_title_num], dtype = 'float32')
+        for i in range(model.input.batch_size):
+            tmp_input_table_title[i,:title_nums[i]] = np.asarray(feed_dict[model.input.input_table_title][i], dtype='int32')
+
+
+        each_len = feed_dict[model.input.input_item_length]              # batch itemnum
+        max_item_len = max([max(l) for l in each_len])
+        tmp_table_items = np.zeros([model.input.batch_size, max_title_num, max_item_len], dtype = 'int32')
+
+        for i in range(model.input.batch_size):
+            for j in range(title_nums[i]):
+                tmp_table_items[i,j,:each_len[i][j]] = np.asarray(feed_dict[model.input.input_table_items][i][j], dtype='int32')
+
+
+
+        tmp_input_item_length = np.zeros([model.input.batch_size, max_title_num], dtype = 'int32')
+        for i in range(model.input.batch_size):
+            tmp_input_item_length[i,:title_nums[i]] = np.asarray(feed_dict[model.input.input_item_length][i], dtype='int32')
+
+        each_target_len = feed_dict[model.input.target_numsteps]
+        max_target_len = max(each_target_len)
+        tmp_targets = np.zeros([model.input.batch_size, max_target_len], dtype = 'int32')
+        for i in range(model.input.batch_size):
+            tmp_targets[i,:each_target_len[i]] = np.asarray(feed_dict[model.input.targets][i], dtype='int32')
+
+
+
+
+        feed_dict[model.input.input_table_title] = tmp_input_table_title
+        feed_dict[model.input.input_table_items] = tmp_table_items
+        feed_dict[model.input.input_item_length] = tmp_input_item_length
+        feed_dict[model.input.targets] = tmp_targets
+        feed_dict[model.input.target_numsteps] = np.asarray(feed_dict[model.input.target_numsteps], dtype = 'int32')
+
 
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
         state = vals["final_state"]
 
         costs += cost
-        iters += model.input.num_steps
+        iters += model.input.target_numsteps
 
-        if verbose and step % (model.input.epoch_size // 10) == 10:
+        if verbose and i % (model.input.epoch_size // 10) == 10:
             print("%.3f perplexity: %.3f speed: %.0f wps" %
-                  (step * 1.0 / model.input.epoch_size, np.exp(costs / iters),
+                  (i * 1.0 / model.input.epoch_size, np.exp(costs / iters),
                    iters * model.input.batch_size / (time.time() - start_time)))
 
     return np.exp(costs / iters)
@@ -342,11 +381,12 @@ def main(_):
             for i in range(config.max_max_epoch):
                 lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
                 m.assign_lr(session, config.learning_rate * lr_decay)
+                print (config.learning_rate * lr_decay)
 
                 print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
                 train_perplexity = run_epoch(session, m, train_data, eval_op=m.train_op, verbose=True )
                 print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
-                valid_perplexity = run_epoch(session, mvalid)
+                valid_perplexity = run_epoch(session, mvalid, dev_data)
                 print("Epoch: %d Valid Perplexity: %.3f" % (i + 1, valid_perplexity))
 
             test_perplexity = run_epoch(session, mtest)
