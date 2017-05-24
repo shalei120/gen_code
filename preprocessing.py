@@ -151,23 +151,24 @@ def DataPreprocessing():
                     if word in index2word_set:
                         content_word_ids.append(word2index[word])
                     else:
-                        content_word_ids.append(len(index2word))
-                        word2index[word] = len(index2word)
-                        index2word.append(word)
-                        index2word_set.add(word)
-                        print word
-                        wv = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
-                        word2vec[word] = wv
+                        #content_word_ids.append(len(index2word))
+                        #word2index[word] = len(index2word)
+                        #index2word.append(word)
+                        #index2word_set.add(word)
+                        #print word
+                        #wv = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
+                        #word2vec[word] = wv
 
-                        buffer_vec.append(wv)
+                        #buffer_vec.append(wv)
+                        content_word_ids.append(word2index['</s>'])
 
                 resitem.append(content_word_ids)
                 box.append(resitem)
             boxes.append(box)
 
-        buffer_np_vec = numpy.asarray(buffer_vec)
-        global index2vec
-        index2vec = numpy.concatenate([index2vec, buffer_np_vec], axis=0)
+        #buffer_np_vec = numpy.asarray(buffer_vec)
+        #global index2vec
+        #index2vec = numpy.concatenate([index2vec, buffer_np_vec], axis=0)
 
         sentnbs = sentencenumfile.readlines()
         sentnbs = [int(a) for a in sentnbs]

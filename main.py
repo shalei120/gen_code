@@ -68,6 +68,9 @@ class S2TInput(object):
         #    self.targets.append(tf.placeholder(tf.int32, shape=[None], name="decoder{0}".format(i)))
         self.targets = tf.placeholder('int32', [None, None])
         self.target_numsteps = tf.placeholder('int32',[None])
+        self.embedding_size = int(sys.argv[1])
+
+        self.initial_cell = tf.placeholder('float32', [None, self.embedding_size ])
 
 
 
@@ -108,11 +111,12 @@ class Structure2TextModel(object):
             embedding = tf.Variable(index2vec)
             table_title = tf.nn.embedding_lookup(embedding, input_.input_table_title)
             table_items = tf.nn.embedding_lookup(embedding, input_.input_table_items)
+            table_item_lengths = input_.input_item_length
             targets = tf.nn.embedding_lookup(embedding, input_.targets)
 
         batch_size = tf.shape(table_title)[0]
         slot_num = tf.shape(table_title)[1]
-        max_content_length = tf.shape(table_title)[2]
+        max_content_length = tf.shape(table_items)[2]
         embedding_size = int(sys.argv[1])
         num_steps = tf.shape(targets)[1]
         target_real_num_steps = input_.target_numsteps
@@ -121,10 +125,10 @@ class Structure2TextModel(object):
         # embedding the content of the table
         with tf.variable_scope("RNN1"):
             table_items_reshaped = tf.reshape(table_items, [batch_size*slot_num, max_content_length, embedding_size])
-            table_item_length_reshaped = tf.reshape(table_items, [batch_size*slot_num])
+            table_item_length_reshaped = tf.reshape(table_item_lengths, [batch_size*slot_num])
             table_encode_cell = lstm_cell()
             table_item_vector_reshaped, final_state = tf.nn.dynamic_rnn(table_encode_cell, table_items_reshaped, sequence_length = table_item_length_reshaped, dtype = data_type())
-            table_item_vector = tf.reshape(table_item_vector_reshaped, [batch_size, slot_num, config.hidden_size])
+            table_item_vector = tf.reshape(table_item_vector_reshaped[:,-1,:], [batch_size, slot_num, config.hidden_size])
 
         #if is_training and config.keep_prob < 1:
        #     inputs = tf.nn.dropout(inputs, config.keep_prob)
@@ -139,7 +143,7 @@ class Structure2TextModel(object):
         # outputs, state = tf.contrib.rnn.static_rnn(
         #     cell, inputs, initial_state=self._initial_state)
         outputs = []
-        cell_output = tf.placeholder('float32', [None, embedding_size])#tf.Variable(tf.truncated_normal([batch_size, config.hidden_size*config.num_layers]))
+        cell_output = input_.initial_cell#tf.Variable(tf.truncated_normal([batch_size, config.hidden_size*config.num_layers]))
         W = weight_variable([embedding_size, embedding_size])
         W_out2emb = weight_variable([config.hidden_size, embedding_size])
         b_out2emb = weight_variable([ embedding_size])
@@ -184,15 +188,12 @@ class Structure2TextModel(object):
                body=loop_fn,
                loop_vars=(time, cell_output, state, emit_vs, f0))
 
-            outputs = tf.transpose(emit_vs.stack(), [1, 0, 2])
+            output = tf.transpose(emit_vs.stack(), [1, 0, 2])
+            self.tt = [output, tf.shape(output),target_real_num_steps]
 
-        output = tf.reshape(tf.concat(axis=1, values=outputs), [-1, size])
-        softmax_w = tf.get_variable(
-            "softmax_w", [size, vocab_size], dtype=data_type())
-        softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-        logits = tf.matmul(output, softmax_w) + softmax_b
+        logits = output
         loss = tf.contrib.legacy_seq2seq.sequence_loss_by_example(
-            [logits],
+            [tf.reshape(logits, [batch_size*num_steps, -1])],
             [tf.reshape(input_.targets, [-1])],
             [tf.ones([batch_size * num_steps], dtype=data_type())])
 
@@ -267,6 +268,8 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     costs = 0.0
     iters = 0
     state = session.run(model.initial_state)
+    init = tf.global_variables_initializer()
+    session.run(init)
 
     fetches = {
         "cost": model.cost,
@@ -277,6 +280,8 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
 
     print(model.input.epoch_size)
 
+    rng = np.random.RandomState(1234)
+
     for i in range(model.input.epoch_size):
         feed_dict = {}
         feed_dict[model.input.input_table_title] = data[0][i * model.input.batch_size:(i+1) * model.input.batch_size]
@@ -284,6 +289,10 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
         feed_dict[model.input.input_item_length] = data[2][i * model.input.batch_size:(i+1) * model.input.batch_size]
         feed_dict[model.input.targets]           = data[3][i * model.input.batch_size:(i+1) * model.input.batch_size]
         feed_dict[model.input.target_numsteps]   = data[4][i * model.input.batch_size:(i+1) * model.input.batch_size]
+        feed_dict[model.input.initial_cell]   = np.asarray(rng.uniform(
+                                                        low = -np.sqrt(6. / (model.input.batch_size + model.input.embedding_size)),
+                                                        high = np.sqrt(6. / (model.input.batch_size + model.input.embedding_size)),
+                                                        size = (model.input.batch_size, model.input.embedding_size)), dtype = 'float32')
 
         title_nums = [len(t) for t in feed_dict[model.input.input_table_title]]
         max_title_num = max(title_nums)
@@ -322,6 +331,7 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
         feed_dict[model.input.target_numsteps] = np.asarray(feed_dict[model.input.target_numsteps], dtype = 'int32')
 
 
+        print(session.run( model.tt, feed_dict))
         vals = session.run(fetches, feed_dict)
         cost = vals["cost"]
         state = vals["final_state"]
