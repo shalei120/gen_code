@@ -127,7 +127,7 @@ def transfer_boxes():
         lines = infoboxfile.readlines()
         boxes=[]
         for line in lines:
-            box = transform_infobox(line)
+            box = transform_infobox(line.lower())
             boxes.append(box)
         return boxes
 
@@ -168,7 +168,7 @@ def DataPreprocessing():
             box = []
             for index,item in enumerate(dealed_table):
                 resitem = []
-                resitem.append(title_set[item[0]])
+                resitem.append(TurnWordID(item[0].split()))
                 content_words = item[1].split()
                 if len(content_words) > 15:
                     inum+=1
@@ -222,7 +222,7 @@ def DataPreprocessing():
 
             for i in range(nb):
                 sent = sentencefile.readline()
-                words = ['START_TOKEN'] + sent.split()
+                words =  sent.split()
                 sentids = TurnWordID(words)
                 sentences += sentids
                 #print sent

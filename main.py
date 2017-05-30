@@ -60,15 +60,22 @@ def prepare_data(data, start, end):
     conf = get_config()
 
     title_nums = [len(t) for t in data0]
+    title_word_num = [[len(title)  for title in tlist ]for tlist in data0]
+    max_title_word_num = max([max(l) for l in title_word_num])
     #max_title_num = max(title_nums)
-    tmp_input_table_title = np.zeros([batch_size, conf.item_num], dtype='float32')
+    tmp_input_table_title = np.zeros([batch_size, conf.item_num, max_title_word_num], dtype='float32')
     for ii in range(batch_size):
         if title_nums[ii] > conf.item_num:
             data0[ii] = data0[ii][:conf.item_num]
-
-        arr = np.asarray(data0[ii], dtype='int32')
-        tmp_input_table_title[ii, :title_nums[ii]] = arr
+        for j in range(conf.item_num):
+            arr = np.asarray(data0[ii][j], dtype='int32')
+            tmp_input_table_title[ii, j,:title_word_num[ii][j]] = arr
         # print (title_nums[ii], arr.shape)
+
+    tmp_title_word_num = np.zeros([batch_size, conf.item_num],dtype = 'int32')
+    for ii in  range(batch_size):
+        arr = np.asarray(title_word_num[ii], dtype = 'int32')
+        tmp_title_word_num[ii, : title_nums[ii]] = arr
 
     each_len = data2 # batch itemnum
     #max_item_len = max([max(l) for l in each_len])
@@ -94,7 +101,7 @@ def prepare_data(data, start, end):
     for ii in range(batch_size):
         tmp_targets[ii, :each_target_len[ii]] = np.asarray(data3[ii], dtype='int32')
 
-    return tmp_input_table_title, tmp_table_items, tmp_input_item_length, tmp_targets, np.asarray(data4, dtype='int32'), max_target_len
+    return tmp_input_table_title, tmp_table_items, tmp_input_item_length, tmp_targets, np.asarray(data4, dtype='int32'), tmp_title_word_num, max_target_len
 
 def weight_variable(shape):
     """Create a weight variable with appropriate initialization."""
@@ -116,7 +123,8 @@ class S2TInput(object):
         self.num_steps = num_steps = config.num_steps
         self.epoch_size = len(data[0]) // batch_size -1
         self.item_num = config.item_num
-        self.input_table_title = tf.placeholder('int32', [None, self.item_num])
+        self.input_table_title = tf.placeholder('int32', [None, self.item_num, None])
+        self.input_table_title_word_num =  tf.placeholder('int32', [None, self.item_num])
         self.input_table_items = tf.placeholder('int32', [None, self.item_num, None])
         self.input_item_length = tf.placeholder('int32', [None, self.item_num])
         #for i in xrange(buckets[-1][1] + 1):
@@ -171,7 +179,10 @@ class Structure2TextModel(object):
             table_title = tf.nn.embedding_lookup(title_embedding, input_.input_table_title)
             table_items = tf.nn.embedding_lookup(embedding, input_.input_table_items)
             table_item_lengths = input_.input_item_length
-            targets = tf.nn.embedding_lookup(embedding, input_.targets)
+            sta = tf.Variable(np.asarray([word2index['START_TOKEN']] * batch_size), trainable = False)
+            targets = tf.nn.embedding_lookup(embedding, tf.concat([tf.expand_dims(sta, 1),input_.targets], axis = 1))
+            # add start_op
+
 
         batch_size = tf.shape(table_title)[0]
         slot_num = tf.shape(table_title)[1]
@@ -203,60 +214,20 @@ class Structure2TextModel(object):
         #     cell, inputs, initial_state=self._initial_state)
         outputs = []
         cell_output = input_.initial_cell#tf.Variable(tf.truncated_normal([batch_size, config.hidden_size*config.num_layers]))
-        W = weight_variable([config.hidden_size, embedding_size])
-        W_out2emb = weight_variable([config.hidden_size, embedding_size])
-        b_out2emb = weight_variable([ embedding_size])
+        W = weight_variable([embedding_size, embedding_size])
 
-        with tf.variable_scope("RNN"):
-            # for time_step in range(input_.fuck):
-            emit_vs = tf.TensorArray(dtype=tf.float32, dynamic_size=True, size=0)
-            time = tf.constant(0, dtype=tf.int32)
-            f0 = tf.zeros([batch_size], dtype=tf.bool)
-            state = self._initial_state
-            inputs_ta = tf.TensorArray(dtype=tf.float32, size=num_steps)
-            inputs_ta = inputs_ta.unstack(tf.transpose(targets, [1, 0,2]))
-
-            def loop_fn(t, cell_output, state, emit_vs, finished):
-
-                #cell_output_tile = tf.tile(cell_output, [1,input_.item_num])
-               # cell_out_1 = tf.reshape(cell_output_tile,[batch_size, input_.item_num, -1])
-               # cell_out_1 * table_title
-
-                attention = tf.cond(tf.equal(t, 0),
-                            lambda: tf.ones([batch_size,input_.item_num], dtype=tf.float32),
-                            lambda: tf.matmul(tf.expand_dims(tf.matmul(cell_output, W), 1), tf.transpose(table_title, perm = [0,2,1])) [:, 0,:])  # the weight of table items
-
-                finished = tf.greater_equal(t + 1, target_real_num_steps)
-
-
-                attention = tf.nn.softmax(attention)
-
-                tableinput = tf.matmul(tf.expand_dims(attention, 1) , table_item_vector)[:,0,:]   # batch 1 embed_size
-
-                x_nt = tf.cond(tf.reduce_all(finished), lambda: tf.zeros([batch_size, embedding_size], dtype=tf.float32),
-                               lambda: inputs_ta.read(t))
-                nextinput = tf.concat([x_nt, tableinput], 1)
-                (cell_output_nt, state_nt) = cell(nextinput, state)
-
-                emit_vs = emit_vs.write(t,cell_output_nt)
-               # outputs.append(vocab_score)
-                return t+1, cell_output_nt, state_nt, emit_vs, finished
-
-            _, _, _, emit_vs,_ = tf.while_loop(
-               cond=lambda _1, _2, _3, _4, finished: tf.logical_not(tf.reduce_all(finished)),
-               body=loop_fn,
-               loop_vars=(time, cell_output, state, emit_vs, f0))
-
-            output = tf.transpose(emit_vs.stack(), [1, 0, 2])
-
-        output = tf.reshape(output, [batch_size * num_steps, size])
         softmax_w = tf.get_variable(
             "softmax_w", [size, vocab_size], dtype=data_type())
         softmax_b = tf.get_variable("softmax_b", [vocab_size], dtype=data_type())
-        logits = tf.matmul(output, softmax_w) + softmax_b
+        state = self._initial_state
 
+        output = self.decoder_last(state, [cell, W, input_, batch_size, table_title,table_item_vector, embedding, softmax_w, softmax_b,num_steps, targets, embedding_size, target_real_num_steps])
+        pred_output = self.decoder_gen(state, [cell, W, input_, batch_size, table_title,table_item_vector, embedding, softmax_w, softmax_b, embedding_size, target_real_num_steps])
 
-        self.pred_tokens = tf.reshape(tf.argmax(logits, axis = 1), [batch_size, num_steps])
+        logits = tf.reshape(output, [batch_size * num_steps, vocab_size])
+        pred_logits = tf.reshape(pred_output, [batch_size * num_steps, vocab_size])
+
+        self.pred_tokens = tf.reshape(tf.argmax(pred_logits, axis = 1), [batch_size, num_steps])
 
         self.tt = [output, tf.shape(output), tf.shape(softmax_w),tf.shape(logits)]
         #vocab_score = tf.matmul(out_wordemb, tf.transpose(embedding))  # batch * vocabsize
@@ -292,15 +263,65 @@ class Structure2TextModel(object):
     def assign_lr(self, session, lr_value):
         session.run(self._lr_update, feed_dict={self._new_lr: lr_value})
 
-    def decoder_test(self):
+    def decoder_last(self,state, params):
+        cell, W, input_, batch_size, table_title,table_item_vector, embedding, softmax_w, softmax_b, num_steps, targets, embedding_size, target_real_num_steps = params
+
         with tf.variable_scope("RNN"):
             # for time_step in range(input_.fuck):
             emit_vs = tf.TensorArray(dtype=tf.float32, dynamic_size=True, size=0)
             time = tf.constant(0, dtype=tf.int32)
             f0 = tf.zeros([batch_size], dtype=tf.bool)
-            state = self._initial_state
             inputs_ta = tf.TensorArray(dtype=tf.float32, size=num_steps)
             inputs_ta = inputs_ta.unstack(tf.transpose(targets, [1, 0,2]))
+
+
+            def loop_fn(t, state, emit_vs, finished):
+
+                #cell_output_tile = tf.tile(cell_output, [1,input_.item_num])
+               # cell_out_1 = tf.reshape(cell_output_tile,[batch_size, input_.item_num, -1])
+               # cell_out_1 * table_title
+                x_nt = tf.cond(tf.reduce_all(finished),
+                               lambda: tf.zeros([batch_size, embedding_size], dtype=tf.float32),
+                               lambda: inputs_ta.read(t))
+
+                attention = tf.cond(tf.equal(t, 0),
+                            lambda: tf.ones([batch_size,input_.item_num], dtype=tf.float32),
+                            lambda: tf.matmul(tf.expand_dims(tf.matmul(x_nt, W), 1), tf.transpose(table_title, perm = [0,2,1])) [:, 0,:])  # the weight of table items
+
+                finished = tf.greater_equal(t + 1, target_real_num_steps)
+
+                attention = tf.nn.softmax(attention)
+
+                title_content = tf.concat([table_title, table_item_vector], axis = 2 )
+
+                tableinput = tf.matmul(tf.expand_dims(attention, 1) , title_content)[:,0,:]   # batch 1 embed_size
+
+
+                nextinput = tf.concat([x_nt, tableinput], 1)
+                (cell_output_nt, state_nt) = cell(nextinput, state)
+                out_word_quasi_prob = tf.matmul(cell_output_nt, softmax_w) + softmax_b
+                emit_vs = emit_vs.write(t,out_word_quasi_prob)
+               # outputs.append(vocab_score)
+                return t+1, state_nt, emit_vs, finished
+
+            _, _, emit_vs,_ = tf.while_loop(
+               cond=lambda _1, _2, _3, finished: tf.logical_not(tf.reduce_all(finished)),
+               body=loop_fn,
+               loop_vars=(time, state, emit_vs, f0))
+
+            output = tf.transpose(emit_vs.stack(), [1, 0, 2])
+            return output
+
+
+    def decoder_gen(self,state, params):
+        cell, W, input_, batch_size,table_title ,table_item_vector, embedding,softmax_w, softmax_b, embedding_size, target_real_num_steps = params
+        with tf.variable_scope("RNNGen"):
+            # for time_step in range(input_.fuck):
+            emit_vs = tf.TensorArray(dtype=tf.float32, dynamic_size=True, size=0)
+            time = tf.constant(0, dtype=tf.int32)
+            f0 = tf.zeros([batch_size], dtype=tf.bool)
+            cell_output = tf.tile(tf.nn.embedding_lookup(embedding, word2index['START_TOKEN']), tf.expand_dims(batch_size,0))
+            cell_output = tf.reshape(cell_output, [batch_size, embedding_size])
 
             def loop_fn(t, cell_output, state, emit_vs, finished):
 
@@ -319,14 +340,15 @@ class Structure2TextModel(object):
 
                 tableinput = tf.matmul(tf.expand_dims(attention, 1) , table_item_vector)[:,0,:]   # batch 1 embed_size
 
-                x_nt = tf.cond(tf.reduce_all(finished), lambda: tf.zeros([batch_size, embedding_size], dtype=tf.float32),
-                               lambda: inputs_ta.read(t))
+                x_nt = cell_output
                 nextinput = tf.concat([x_nt, tableinput], 1)
                 (cell_output_nt, state_nt) = cell(nextinput, state)
+                out_word_quasi_prob = tf.matmul(cell_output_nt, softmax_w) + softmax_b
+                out_word_index = tf.argmax(out_word_quasi_prob, axis = 1)
+                out_word_emd = tf.nn.embedding_lookup(embedding, out_word_index)
 
-                emit_vs = emit_vs.write(t,cell_output_nt)
-               # outputs.append(vocab_score)
-                return t+1, cell_output_nt, state_nt, emit_vs, finished
+                emit_vs = emit_vs.write(t,out_word_quasi_prob)
+                return t+1, out_word_emd, state_nt, emit_vs, finished
 
             _, _, _, emit_vs,_ = tf.while_loop(
                cond=lambda _1, _2, _3, _4, finished: tf.logical_not(tf.reduce_all(finished)),
@@ -334,6 +356,7 @@ class Structure2TextModel(object):
                loop_vars=(time, cell_output, state, emit_vs, f0))
 
             output = tf.transpose(emit_vs.stack(), [1, 0, 2])
+            return output
 
     def generate(self, data, sess):
         rng = np.random.RandomState(1234)
@@ -391,6 +414,7 @@ class SmallConfig(object):
     vocab_size = len(index2vec)
     item_num = 25
     content_len = 15
+    embedding_size = int(sys.argv[1])
 
 
 
@@ -414,7 +438,7 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     rng = np.random.RandomState(1234)
 
     for i in range(model.input.epoch_size):
-        data0, data1, data2, data3, data4, max_target_len = prepare_data(data, i * model.input.batch_size, (i+1) * model.input.batch_size)
+        data0, data1, data2, data3, data4, tmp_title_word_num, max_target_len = prepare_data(data, i * model.input.batch_size, (i+1) * model.input.batch_size)
         feed_dict = dict()
         feed_dict[model.input.input_table_title] = data0
         feed_dict[model.input.input_table_items] = data1
@@ -450,16 +474,19 @@ def get_config():
         return SmallConfig()
 
 last_best = 0
+
+gold_file = dict()
 def evaluate(sess, model, data, type):
     global last_best
     pred_path = FLAGS.data_path+ 'evaluate/' + type + '/'
     gold_path = FLAGS.data_path+ 'evaluate/' + type + '_gold/'
 
-    pred_list, gold_list = [], []
+    pred_list =  []
     batch_num = model.input.epoch_size
 
     pred_set = []
     gold_set = []
+    gold_list = []
 
     for i in range(batch_num):
         #print(i * model.input.batch_size, (i + 1) * model.input.batch_size, len(data[0]))
@@ -468,19 +495,26 @@ def evaluate(sess, model, data, type):
         for k, (case, gold) in enumerate(zip(predictions, data[3])):
             with open(pred_path + str(k) + '.txt', 'w') as sw:
                 summary = list(case)
-                #if 2 in summary:
-                 #   summary = summary[:summary.index(2)] if summary[0] != 2 else [2]
+                if 2 in summary:
+                    summary = summary[:summary.index(2)] if summary[0] != 2 else [2]
                 sw.write(" ".join([str(x) for x in summary]) + '\n')
                 pred_list.append([str(x) for x in summary])
                 pred_set.append(pred_path + str(k) + '.txt')
 
-            with open(gold_path + str(k) + '.txt', 'w') as g:
-                summary = list(gold)
-                #if 2 in summary:
-                 #   summary = summary[:summary.index(2)] if summary[0] != 2 else [2]
-                g.write(" ".join([str(x) for x in summary]) + '\n')
-                gold_list.append([str(x) for x in summary])
-                gold_set.append([gold_path + str(k)+ '.txt'])
+
+            if type not in gold_file :
+                with open(gold_path + str(k) + '.txt', 'w') as g:
+                    summary = list(gold)
+                    #if 2 in summary:
+                     #   summary = summary[:summary.index(2)] if summary[0] != 2 else [2]
+                    g.write(" ".join([str(x) for x in summary]) + '\n')
+                    gold_list.append([str(x) for x in summary])
+                    gold_set.append([gold_path + str(k)+ '.txt'])
+
+    if type not in gold_file:
+        gold_file[type] = (gold_set, gold_list)
+    else:
+        (gold_set, gold_list) = gold_file[type]
 
     recall, precision, F_measure = PythonROUGE(pred_set, gold_set, ngram_order=4)
     bleu = corpus_bleu(gold_list, pred_list)
@@ -524,7 +558,7 @@ def main(_):
         with tf.name_scope("Test"):
             test_input = S2TInput(config=config, data=test_data, name="TestInput")
             with tf.variable_scope("Model", reuse=True, initializer=initializer):
-                mtest = Structure2TextModel(is_training=False, config=eval_config,
+                mtest = Structure2TextModel(is_training=False, config=config,
                                  input_=test_input)
 
         #sv = tf.train.Supervisor(logdir=FLAGS.save_path)
@@ -535,7 +569,7 @@ def main(_):
             init = tf.global_variables_initializer()
             session.run(init)
 
-            print(evaluate(session, mvalid, dev_data, 'dev'))
+            #print(evaluate(session, mvalid, dev_data, 'dev'))
             for i in range(config.max_max_epoch):
                 lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
                 m.assign_lr(session, config.learning_rate * lr_decay)
