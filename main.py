@@ -39,6 +39,7 @@ def load_data():
     index2vec = cPickle.load(datafile)
     index2word = cPickle.load(datafile)
     word2index = cPickle.load(datafile)
+    print(index2word[10030])
     #print(len(index2vec))
     title_set = cPickle.load(datafile)
 
@@ -58,33 +59,40 @@ def prepare_data(data, start, end):
     data4 = data[4][start:end]
     batch_size = len(data0)
     conf = get_config()
+    res = dict()
 
     title_nums = [len(t) for t in data0]
     title_word_num = [[len(title)  for title in tlist ]for tlist in data0]
     max_title_word_num = max([max(l) for l in title_word_num])
     #max_title_num = max(title_nums)
-    tmp_input_table_title = np.zeros([batch_size, conf.item_num, max_title_word_num], dtype='float32')
+    tmp_input_table_title = np.zeros([batch_size, conf.item_num, max_title_word_num], dtype='int32')
+    tmp_input_table_title_mask = np.zeros([batch_size, conf.item_num, max_title_word_num], dtype='int32')
     for ii in range(batch_size):
         if title_nums[ii] > conf.item_num:
             data0[ii] = data0[ii][:conf.item_num]
-        for j in range(conf.item_num):
+        for j in range(min(conf.item_num, title_nums[ii])):
             arr = np.asarray(data0[ii][j], dtype='int32')
             tmp_input_table_title[ii, j,:title_word_num[ii][j]] = arr
-        # print (title_nums[ii], arr.shape)
+            tmp_input_table_title_mask[ii, j,:title_word_num[ii][j]] = 1
 
+        # print (title_nums[ii], arr.shape)
     tmp_title_word_num = np.zeros([batch_size, conf.item_num],dtype = 'int32')
     for ii in  range(batch_size):
+        if title_nums[ii] > conf.item_num:
+            title_word_num[ii]= title_word_num[ii][:conf.item_num]
         arr = np.asarray(title_word_num[ii], dtype = 'int32')
         tmp_title_word_num[ii, : title_nums[ii]] = arr
 
     each_len = data2 # batch itemnum
     #max_item_len = max([max(l) for l in each_len])
     tmp_table_items = np.zeros([batch_size, conf.item_num, conf.content_len], dtype='int32')
+    tmp_table_items_mask = np.zeros([batch_size, conf.item_num, conf.content_len], dtype='int32')
 
     for ii in range(batch_size):
         for j in range(min(title_nums[ii], conf.item_num)):
             tmp_table_items[ii, j, :min(each_len[ii][j], conf.content_len)] = np.asarray(
                 data1[ii][j], dtype='int32')[:conf.content_len]
+            tmp_table_items_mask[ii, j, :min(each_len[ii][j], conf.content_len)] = 1
 
     # print(tmp_table_items.shape)
 
@@ -97,11 +105,25 @@ def prepare_data(data, start, end):
 
     each_target_len = data4
     max_target_len = max(each_target_len)
-    tmp_targets = np.zeros([batch_size, max_target_len], dtype='int32')
-    for ii in range(batch_size):
-        tmp_targets[ii, :each_target_len[ii]] = np.asarray(data3[ii], dtype='int32')
+    tmp_targets = np.zeros([batch_size, max_target_len+1], dtype='int32')
+    tmp_targets_mask = np.zeros([batch_size, max_target_len+1], dtype='int32')
 
-    return tmp_input_table_title, tmp_table_items, tmp_input_item_length, tmp_targets, np.asarray(data4, dtype='int32'), tmp_title_word_num, max_target_len
+    for ii in range(batch_size):
+        tmp_targets[ii, 0] = word2index['START_TOKEN']
+        tmp_targets[ii, 1:(each_target_len[ii]+1)] = np.asarray(data3[ii], dtype='int32')
+        tmp_targets_mask[ii, :(each_target_len[ii] + 1)] = 1
+
+    res['input_table_title'] = tmp_input_table_title
+    res['input_table_items'] = tmp_table_items
+    res['input_item_length'] = tmp_input_item_length
+    res['targets'] = tmp_targets
+    res['target_numsteps'] = np.asarray(data4, dtype='int32')
+    res['input_table_title_word_num'] = tmp_title_word_num
+    res['max_target_len'] = max_target_len
+    res['input_table_title_mask'] = tmp_input_table_title_mask
+    res['input_table_items_mask'] = tmp_table_items_mask
+    res['targets_mask'] = tmp_targets_mask
+    return res
 
 def weight_variable(shape):
     """Create a weight variable with appropriate initialization."""
@@ -124,12 +146,16 @@ class S2TInput(object):
         self.epoch_size = len(data[0]) // batch_size -1
         self.item_num = config.item_num
         self.input_table_title = tf.placeholder('int32', [None, self.item_num, None])
+        self.input_table_title_mask = tf.placeholder('int32', [None, self.item_num, None])
         self.input_table_title_word_num =  tf.placeholder('int32', [None, self.item_num])
+
         self.input_table_items = tf.placeholder('int32', [None, self.item_num, None])
+        self.input_table_items_mask = tf.placeholder('int32', [None, self.item_num, None])
         self.input_item_length = tf.placeholder('int32', [None, self.item_num])
         #for i in xrange(buckets[-1][1] + 1):
         #    self.targets.append(tf.placeholder(tf.int32, shape=[None], name="decoder{0}".format(i)))
         self.targets = tf.placeholder('int32', [None, None])
+        self.targets_mask = tf.placeholder('int32', [None, None])  # need one more in dim 1
         self.target_numsteps = tf.placeholder('int32',[None])
         self.embedding_size = int(sys.argv[1])
 
@@ -171,27 +197,29 @@ class Structure2TextModel(object):
                 return tf.contrib.rnn.DropoutWrapper(lstm_cell(), output_keep_prob=config.keep_prob)
         cell = tf.contrib.rnn.MultiRNNCell([attn_cell() for _ in range(config.num_layers)], state_is_tuple=True)
 
-        self._initial_state = cell.zero_state(batch_size, data_type())
+
 
         with tf.device("/cpu:0"):
             embedding = tf.Variable(index2vec)
-            title_embedding = tf.Variable(np.random.normal(size=[len(title_set), int(sys.argv[1])]).astype('float32'))
-            table_title = tf.nn.embedding_lookup(title_embedding, input_.input_table_title)
-            table_items = tf.nn.embedding_lookup(embedding, input_.input_table_items)
-            table_item_lengths = input_.input_item_length
-            sta = tf.Variable(np.asarray([word2index['START_TOKEN']] * batch_size), trainable = False)
-            targets = tf.nn.embedding_lookup(embedding, tf.concat([tf.expand_dims(sta, 1),input_.targets], axis = 1))
-            # add start_op
+            table_title =  tf.nn.embedding_lookup(embedding, input_.input_table_title) * tf.cast(tf.expand_dims(input_.input_table_title_mask, 3), tf.float32)
+            table_title = tf.reduce_sum(table_title, axis = 2)
+            table_title = table_title / (tf.cast(tf.expand_dims(input_.input_table_title_word_num,2), tf.float32) + 0.0001)
 
+
+            table_items =  tf.nn.embedding_lookup(embedding, input_.input_table_items) * tf.cast(tf.expand_dims(input_.input_table_items_mask, 3), tf.float32)
+            table_item_lengths = input_.input_item_length
+            #sta = tf.Variable(tf.zeros([batch_size,], tf.int32) + word2index['START_TOKEN'], trainable = False)
+            targets =  tf.nn.embedding_lookup(embedding, input_.targets) * tf.cast(tf.expand_dims(input_.targets_mask, 2), tf.float32)
+            # add start_op
 
         batch_size = tf.shape(table_title)[0]
         slot_num = tf.shape(table_title)[1]
         max_content_length = tf.shape(table_items)[2]
         embedding_size = int(sys.argv[1])
-        num_steps = tf.shape(targets)[1]
+        num_steps = tf.shape(targets)[1] - 1
         target_real_num_steps = input_.target_numsteps
 
-
+        self._initial_state = cell.zero_state(batch_size, data_type())
         # embedding the content of the table
         with tf.variable_scope("RNN1"):
             table_items_reshaped = tf.reshape(table_items, [batch_size*slot_num, max_content_length, embedding_size])
@@ -227,9 +255,10 @@ class Structure2TextModel(object):
         logits = tf.reshape(output, [batch_size * num_steps, vocab_size])
         pred_logits = tf.reshape(pred_output, [batch_size * num_steps, vocab_size])
 
+        self.sup_tokens = tf.reshape(tf.argmax(logits, axis = 1), [batch_size, num_steps])
         self.pred_tokens = tf.reshape(tf.argmax(pred_logits, axis = 1), [batch_size, num_steps])
 
-        self.tt = [output, tf.shape(output), tf.shape(softmax_w),tf.shape(logits)]
+        self.tt = [targets]
         #vocab_score = tf.matmul(out_wordemb, tf.transpose(embedding))  # batch * vocabsize
         #chosen_word_indexes = tf.argmax(vocab_score, axis=1)  # batch
         #chosen_words = tf.nn.embedding_lookup(embedding, chosen_word_indexes)  # batch * embsize
@@ -237,9 +266,9 @@ class Structure2TextModel(object):
 
 
         loss = tf.contrib.legacy_seq2seq.sequence_loss_by_example(
-            [logits],
-            [tf.reshape(input_.targets, [-1])],
-            [tf.ones([batch_size * num_steps], dtype=data_type())])
+            [pred_logits],
+            [tf.reshape(input_.targets[:,1:], [-1])],
+            [tf.cast(tf.reshape(input_.targets_mask[:,1:], [batch_size * num_steps]), tf.float32)])
 
         self._cost = cost = tf.reduce_sum(loss)/ tf.cast(batch_size, tf.float32)
         self._final_state = state
@@ -271,7 +300,7 @@ class Structure2TextModel(object):
             emit_vs = tf.TensorArray(dtype=tf.float32, dynamic_size=True, size=0)
             time = tf.constant(0, dtype=tf.int32)
             f0 = tf.zeros([batch_size], dtype=tf.bool)
-            inputs_ta = tf.TensorArray(dtype=tf.float32, size=num_steps)
+            inputs_ta = tf.TensorArray(dtype=tf.float32, size=num_steps+1)
             inputs_ta = inputs_ta.unstack(tf.transpose(targets, [1, 0,2]))
 
 
@@ -358,18 +387,22 @@ class Structure2TextModel(object):
             output = tf.transpose(emit_vs.stack(), [1, 0, 2])
             return output
 
-    def generate(self, data, sess):
+    def generate(self, data_dict, sess):
         rng = np.random.RandomState(1234)
         feed_dict = dict()
-        feed_dict[self.input.input_table_title] = data[0]
-        feed_dict[self.input.input_table_items] = data[1]
-        feed_dict[self.input.input_item_length] = data[2]
-        feed_dict[self.input.targets] = data[3]
-        feed_dict[self.input.target_numsteps] = data[4]
-        feed_dict[self.input.initial_cell] = np.asarray(rng.uniform(
-            low=-np.sqrt(6. / (self.input.batch_size + self.input.embedding_size)),
-            high=np.sqrt(6. / (self.input.batch_size + self.input.embedding_size)),
-            size=(self.input.batch_size, self.input.hidden_size)), dtype='float32')
+        feed_dict[self._input.input_table_title] = data_dict['input_table_title']
+        feed_dict[self._input.input_table_items] = data_dict['input_table_items']
+        feed_dict[self._input.input_item_length] = data_dict['input_item_length']
+        feed_dict[self._input.targets] = data_dict['targets']
+        feed_dict[self._input.target_numsteps] = data_dict['target_numsteps']
+        feed_dict[self._input.initial_cell] = np.asarray(rng.uniform(
+            low=-np.sqrt(6. / (self._input.batch_size +self._input.embedding_size)),
+            high=np.sqrt(6. / (self._input.batch_size + self._input.embedding_size)),
+            size=(self._input.batch_size, self._input.hidden_size)), dtype='float32')
+        feed_dict[self._input.input_table_title_mask] = data_dict['input_table_title_mask']
+        feed_dict[self._input.input_table_title_word_num] = data_dict['input_table_title_word_num']
+        feed_dict[self._input.input_table_items_mask] = data_dict['input_table_items_mask']
+        feed_dict[self._input.targets_mask] = data_dict['targets_mask']
 
         predictions = sess.run(self.pred_tokens, feed_dict)
         return predictions
@@ -401,7 +434,7 @@ class Structure2TextModel(object):
 class SmallConfig(object):
     """Small config."""
     init_scale = 0.1
-    learning_rate = 1.0
+    learning_rate = 0.001
     max_grad_norm = 5
     num_layers = 2
     num_steps = 20
@@ -423,7 +456,7 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     start_time = time.time()
     costs = 0.0
     iters = 0
-    state = session.run(model.initial_state)
+    #state = session.run(model.initial_state)
 
 
     fetches = {
@@ -438,18 +471,21 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
     rng = np.random.RandomState(1234)
 
     for i in range(model.input.epoch_size):
-        data0, data1, data2, data3, data4, tmp_title_word_num, max_target_len = prepare_data(data, i * model.input.batch_size, (i+1) * model.input.batch_size)
+        data_dict = prepare_data(data, i * model.input.batch_size, (i+1) * model.input.batch_size)
         feed_dict = dict()
-        feed_dict[model.input.input_table_title] = data0
-        feed_dict[model.input.input_table_items] = data1
-        feed_dict[model.input.input_item_length] = data2
-        feed_dict[model.input.targets] = data3
-        feed_dict[model.input.target_numsteps] = data4
+        feed_dict[model.input.input_table_title] = data_dict['input_table_title']
+        feed_dict[model.input.input_table_items] = data_dict['input_table_items']
+        feed_dict[model.input.input_item_length] = data_dict['input_item_length']
+        feed_dict[model.input.targets] = data_dict['targets']
+        feed_dict[model.input.target_numsteps] = data_dict['target_numsteps']
         feed_dict[model.input.initial_cell] = np.asarray(rng.uniform(
                                                 low=-np.sqrt(6. / (model.input.batch_size + model.input.embedding_size)),
                                                 high=np.sqrt(6. / (model.input.batch_size + model.input.embedding_size)),
                                                 size=(model.input.batch_size, model.input.hidden_size)), dtype='float32')
-
+        feed_dict[model.input.input_table_title_mask] =data_dict['input_table_title_mask']
+        feed_dict[model.input.input_table_title_word_num] = data_dict['input_table_title_word_num']
+        feed_dict[model.input.input_table_items_mask] = data_dict['input_table_items_mask']
+        feed_dict[model.input.targets_mask] = data_dict['targets_mask']
 
         #print(session.run( model.tt, feed_dict))
         vals = session.run(fetches, feed_dict)
@@ -457,7 +493,7 @@ def run_epoch(session, model, data, eval_op=None, verbose=False):
         state = vals["final_state"]
 
         costs += cost
-        iters += max_target_len
+        iters += data_dict['max_target_len']
 
         #print('iter', i)
        # print(model.input.epoch_size)
@@ -482,7 +518,7 @@ def evaluate(sess, model, data, type):
     gold_path = FLAGS.data_path+ 'evaluate/' + type + '_gold/'
 
     pred_list =  []
-    batch_num = model.input.epoch_size
+    batch_num = len(data[0]) // model._input.batch_size -1
 
     pred_set = []
     gold_set = []
@@ -491,12 +527,12 @@ def evaluate(sess, model, data, type):
     for i in range(batch_num):
         #print(i * model.input.batch_size, (i + 1) * model.input.batch_size, len(data[0]))
         np_datum = prepare_data(data, i * model.input.batch_size, (i + 1) * model.input.batch_size)
-        predictions = model.generate(np_datum[:-1], sess)
+        predictions = model.generate(np_datum, sess)
         for k, (case, gold) in enumerate(zip(predictions, data[3])):
             with open(pred_path + str(k) + '.txt', 'w') as sw:
                 summary = list(case)
-                if 2 in summary:
-                    summary = summary[:summary.index(2)] if summary[0] != 2 else [2]
+                if word2index['END_TOKEN'] in summary:
+                    summary = summary[:summary.index(word2index['END_TOKEN'])] if summary[0] != word2index['END_TOKEN'] else [word2index['END_TOKEN']]
                 sw.write(" ".join([str(x) for x in summary]) + '\n')
                 pred_list.append([str(x) for x in summary])
                 pred_set.append(pred_path + str(k) + '.txt')
@@ -571,13 +607,14 @@ def main(_):
 
             #print(evaluate(session, mvalid, dev_data, 'dev'))
             for i in range(config.max_max_epoch):
-                lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
-                m.assign_lr(session, config.learning_rate * lr_decay)
-                print (config.learning_rate * lr_decay)
+                #lr_decay = config.lr_decay ** max(i + 1 - config.max_epoch, 0.0)
+               # m.assign_lr(session, config.learning_rate * lr_decay)
+               # print ('lrlrlr:',config.learning_rate * lr_decay)
 
+                restrain = evaluate(session, m, [train_data[0][:500],train_data[1][:500], train_data[2][:500],train_data[3][:500],train_data[4][:500]], 'train')
+                print (restrain)
                 print("Epoch: %d Learning rate: %.3f" % (i + 1, session.run(m.lr)))
                 train_perplexity = run_epoch(session, m, train_data, eval_op=m.train_op, verbose=True )
-                #restrain = evaluate(session, m, train_data, 'train')
                 print("Epoch: %d Train Perplexity: %.3f" % (i + 1, train_perplexity))
                 valid_perplexity = run_epoch(session, mvalid, dev_data)
                 resdev = evaluate(session, mvalid, dev_data, 'dev')

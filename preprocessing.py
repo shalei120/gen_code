@@ -22,7 +22,7 @@ def read_word2vec():
     lines = f.readlines()
     g = lambda x: numpy.array(x, dtype=numpy.float32)
     dic = {line.strip().split(' ')[0]: g(line.strip().split(' ')[1:]) for index,line in enumerate(lines) if index < 20000}
-    dic['</s>'] = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
+    dic[' </s>'] = numpy.random.normal(size=[int(sys.argv[1])]).astype('float32')
     dic['UNK'] = numpy.zeros([int(sys.argv[1])]).astype('float32')
     dic['START_TOKEN'] = numpy.zeros([int(sys.argv[1])]).astype('float32')
     dic['END_TOKEN'] = numpy.zeros([int(sys.argv[1])]).astype('float32')
@@ -32,11 +32,10 @@ def read_word2vec():
 
 word2vec = read_word2vec()
 print time.time(), 'Wemb'
-index2word = []
+index2word = sorted(word2vec.keys())
 print time.time(), 'Wembkey'
 word2index = {}
-for i, a in enumerate(word2vec):
-    index2word.append(a)
+for i, a in enumerate(index2word):
     word2index[a] = i
 
 index2vec = numpy.asarray([word2vec[a] for a in index2word])
@@ -187,7 +186,7 @@ def DataPreprocessing():
                         #word2vec[word] = wv
 
                         #buffer_vec.append(wv)
-                        content_word_ids.append(word2index['</s>'])
+                        content_word_ids.append(word2index['UNK'])
 
                 resitem.append(content_word_ids)
                 box.append(resitem)
